@@ -1,0 +1,12 @@
+psycopg2-binary
+sqlalchemy
+pandas
+requests
+beautifulsoup4
+selenium
+lxml
+python-dotenv
+dbt-core
+dbt-postgres
+undetected-chromedriver
+setuptools
