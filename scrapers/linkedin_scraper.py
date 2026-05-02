@@ -1,3 +1,12 @@
+"""
+Scraper LinkedIn - Version définitive (endpoint guest)
+- Liste : seeMoreJobPostings
+- Détails : jobPosting/{job_id}  ← contient le bloc criteria
+- Extrait : description + Niveau hiérarchique + Type d'emploi + Fonction + Secteurs
+- Fallback regex pour education/experience
+"""
+
+import re
 import time
 import requests
 import pandas as pd
@@ -13,7 +22,13 @@ KEYWORDS = [
     "machine learning",
 ]
 LOCATION = "Morocco"
-NB_PAGES = 3  # 3 pages × 25 offres = ~75 offres par mot-clé
+NB_PAGES = 3
+
+LIST_URL = (
+    "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
+    "?keywords={kw}&location={loc}&start={start}"
+)
+DETAIL_URL = "https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{job_id}"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -23,82 +38,144 @@ HEADERS = {
     "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
 }
 
+NIVEAUX_ETUDES = [
+    ("Doctorat",  r"\bDoctorat\b|\bPhD\b|\bDoctorate\b"),
+    ("Bac+5",     r"\bBac\s*\+\s*5\b|\bMaster['s]?\b|\bing[ée]nieur\b|\bengineering\s+degree\b|\bMSc\b"),
+    ("Bac+4",     r"\bBac\s*\+\s*4\b"),
+    ("Bac+3",     r"\bBac\s*\+\s*3\b|\bLicence\b|\bBachelor['s]?\b|\bBSc\b"),
+    ("Bac+2",     r"\bBac\s*\+\s*2\b|\bBTS\b|\bDUT\b|\bAssociate\s+degree\b"),
+]
 
-def get_offer_description(url):
-    """Récupère la description complète de l'offre via la page publique."""
+
+def clean_text(s):
+    return re.sub(r"\s+", " ", s).strip() if s else None
+
+
+def extract_job_id(url):
+    if not url:
+        return None
+    m = re.search(r"-(\d{8,})/?(?:\?|$)", url)
+    return m.group(1) if m else None
+
+
+def extract_education(text):
+    if not text:
+        return None
+    for label, pattern in NIVEAUX_ETUDES:
+        if re.search(pattern, text, flags=re.IGNORECASE):
+            return label
+    return None
+
+
+def extract_experience_years(text):
+    if not text:
+        return None
+    patterns = [
+        r"(\d+)\s*(?:to|à|-|–)\s*(\d+)\s*(?:years?|ans?)\s*(?:of\s+)?(?:experience|d['e ]+exp[ée]rience)",
+        r"(?:minimum\s+|at\s+least\s+)?(\d+)\+?\s*(?:years?|ans?)\s*(?:of\s+)?(?:experience|d['e ]+exp[ée]rience)",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, text, flags=re.IGNORECASE)
+        if m:
+            groups = [g for g in m.groups() if g]
+            if len(groups) == 2:
+                return f"{groups[0]}-{groups[1]} ans"
+            return f"{groups[0]} ans"
+    return None
+
+
+def get_offer_details(offer_url):
+    details = {
+        "description": "",
+        "experience_level": None,
+        "contract_type": None,
+        "function": None,
+        "sector": None,
+        "job_id": None,
+    }
+
+    job_id = extract_job_id(offer_url)
+    if not job_id:
+        return details
+    details["job_id"] = job_id
+
     try:
-        r = requests.get(url, headers=HEADERS, timeout=15)
+        r = requests.get(DETAIL_URL.format(job_id=job_id), headers=HEADERS, timeout=15)
+        if r.status_code != 200:
+            return details
+        r.encoding = "utf-8"
         soup = BeautifulSoup(r.text, "lxml")
+
         desc = soup.find("div", class_="show-more-less-html__markup")
-        return desc.get_text(separator=" ", strip=True) if desc else ""
+        if desc:
+            details["description"] = clean_text(desc.get_text(separator=" "))
+
+        criteria_list = soup.find("ul", class_="description__job-criteria-list")
+        if criteria_list:
+            for item in criteria_list.find_all("li", class_="description__job-criteria-item"):
+                header = item.find("h3", class_="description__job-criteria-subheader")
+                value = item.find("span", class_="description__job-criteria-text")
+                if not header or not value:
+                    continue
+                h_text = header.get_text(strip=True).lower()
+                v_text = clean_text(value.get_text())
+
+                if "niveau" in h_text or "seniority" in h_text:
+                    details["experience_level"] = v_text
+                elif "type" in h_text or "employment" in h_text:
+                    details["contract_type"] = v_text
+                elif "fonction" in h_text or "function" in h_text:
+                    details["function"] = v_text
+                elif "secteur" in h_text or "industries" in h_text or "industrie" in h_text:
+                    details["sector"] = v_text
     except Exception as e:
-        print(f"   ⚠️  Erreur description : {e}")
-        return ""
+        print(f"      ⚠️  Erreur détails : {e}")
+
+    return details
 
 
 def scrape_keyword_page(keyword, start):
-    """Scrape une page (25 offres) pour un mot-clé via l'endpoint public."""
-    url = (
-        "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
-        f"?keywords={keyword.replace(' ', '%20')}"
-        f"&location={LOCATION}"
-        f"&start={start}"
-    )
-    print(f"   📄 start={start} → {url[:90]}...")
-
+    url = LIST_URL.format(kw=keyword.replace(" ", "%20"), loc=LOCATION, start=start)
     try:
         r = requests.get(url, headers=HEADERS, timeout=15)
         if r.status_code != 200:
             print(f"   ⚠️  HTTP {r.status_code}")
             return []
+        r.encoding = "utf-8"
         soup = BeautifulSoup(r.text, "lxml")
-        cards = soup.find_all("div", class_="base-card")
-        return cards
+        return soup.find_all("div", class_="base-card")
     except Exception as e:
         print(f"   ⚠️  Erreur : {e}")
         return []
 
 
 def parse_card(card, keyword):
-    """Extrait les infos d'une carte d'offre."""
     try:
-        # Titre
         title_tag = card.find("h3", class_="base-search-card__title")
-        title = title_tag.get_text(strip=True) if title_tag else None
+        title = clean_text(title_tag.get_text()) if title_tag else None
 
-        # Entreprise
         company_tag = card.find("h4", class_="base-search-card__subtitle")
-        company = company_tag.get_text(strip=True) if company_tag else None
+        company = clean_text(company_tag.get_text()) if company_tag else None
 
-        # Localisation
         loc_tag = card.find("span", class_="job-search-card__location")
-        location = loc_tag.get_text(strip=True) if loc_tag else None
+        location = clean_text(loc_tag.get_text()) if loc_tag else None
 
-        # URL offre
         link_tag = card.find("a", class_="base-card__full-link")
         offer_url = link_tag["href"].split("?")[0] if link_tag and link_tag.has_attr("href") else None
 
-        # Date publication
-        time_tag = card.find("time", class_="job-search-card__listdate")
-        if not time_tag:
-            time_tag = card.find("time", class_="job-search-card__listdate--new")
+        time_tag = (card.find("time", class_="job-search-card__listdate")
+                    or card.find("time", class_="job-search-card__listdate--new"))
         posted_date = time_tag.get("datetime") if time_tag else None
 
         return {
-            "title": title,
-            "company": company,
-            "location": location,
-            "url": offer_url,
-            "posted_date": posted_date,
-            "keyword": keyword,
+            "title": title, "company": company, "location": location,
+            "url": offer_url, "posted_date": posted_date, "keyword": keyword,
         }
-    except Exception as e:
-        print(f"   ⚠️  Erreur parsing : {e}")
+    except Exception:
         return None
 
 
 def scrape_keyword(keyword):
-    """Scrape NB_PAGES pour un mot-clé."""
     print(f"\n🔍 Recherche : '{keyword}'")
     all_cards = []
     for page in range(NB_PAGES):
@@ -108,13 +185,13 @@ def scrape_keyword(keyword):
             break
         all_cards.extend(cards)
         time.sleep(2)
-    print(f"   ✅ {len(all_cards)} offres trouvées pour '{keyword}'")
+    print(f"   ✅ {len(all_cards)} offres trouvées")
     return all_cards
 
 
 def main():
     print("=" * 60)
-    print("🚀 SCRAPER LINKEDIN - Multi-keywords")
+    print("🚀 SCRAPER LINKEDIN - Endpoint guest")
     print(f"   Mots-clés : {len(KEYWORDS)} | Pages/mot-clé : {NB_PAGES}")
     print("=" * 60)
 
@@ -129,40 +206,57 @@ def main():
                 seen_urls.add(parsed["url"])
                 all_offers.append(parsed)
 
-    print(f"\n📊 Total uniques (avant description) : {len(all_offers)}")
+    print(f"\n📊 Total uniques : {len(all_offers)}")
+    if not all_offers:
+        print("\n❌ Aucune offre récupérée.")
+        return
 
-    # Récupérer les descriptions complètes
-    print("\n⬇️  Récupération des descriptions complètes...")
+    print(f"\n⬇️  Enrichissement des {len(all_offers)} offres...")
     final_data = []
     for i, offer in enumerate(all_offers, 1):
-        print(f"   [{i}/{len(all_offers)}] {offer['title'][:60] if offer['title'] else 'sans titre'}...")
-        description = get_offer_description(offer["url"])
-        time.sleep(0.5)
+        title_short = (offer["title"] or "?")[:50]
+        details = get_offer_details(offer["url"])
+
+        education = extract_education(details["description"])
+        experience_fallback = extract_experience_years(details["description"])
+
+        tags = []
+        if details["function"]: tags.append(f"F:{details['function'][:18]}")
+        if details["contract_type"]: tags.append(f"C:{details['contract_type'][:12]}")
+        if details["sector"]: tags.append(f"S:{details['sector'][:18]}")
+        tag_str = " | ".join(tags) if tags else "⚪"
+        print(f"   [{i}/{len(all_offers)}] {title_short} → {tag_str}")
 
         final_data.append({
             "job_title": offer["title"],
             "company": offer["company"],
             "location": offer["location"],
             "summary": None,
-            "description": description,
-            "sector": None,
-            "function": None,
-            "experience": None,
-            "education": None,
-            "contract_type": None,
+            "description": details["description"][:5000] if details["description"] else "",
+            "sector": details["sector"],
+            "function": details["function"],
+            "experience": details["experience_level"] or experience_fallback,
+            "education": education,
+            "contract_type": details["contract_type"],
             "posted_date": offer["posted_date"],
             "url": offer["url"],
+            "job_id": details["job_id"],
             "source": "linkedin",
             "search_keyword": offer["keyword"],
             "scraped_at": datetime.now()
         })
-
-    if not final_data:
-        print("\n❌ Aucune offre récupérée.")
-        return
+        time.sleep(0.5)
 
     df = pd.DataFrame(final_data)
-    print(f"\n📊 Total final : {len(df)} offres")
+    print(f"\n📊 RÉCAPITULATIF")
+    print(f"   • Total              : {len(df)}")
+    print(f"   • Avec entreprise    : {df['company'].notna().sum()}")
+    print(f"   • Avec localisation  : {df['location'].notna().sum()}")
+    print(f"   • Avec secteur       : {df['sector'].notna().sum()}")
+    print(f"   • Avec fonction      : {df['function'].notna().sum()}")
+    print(f"   • Avec expérience    : {df['experience'].notna().sum()}")
+    print(f"   • Avec niveau étude  : {df['education'].notna().sum()}")
+    print(f"   • Avec contrat       : {df['contract_type'].notna().sum()}")
 
     df.to_sql(
         "linkedin_raw",
@@ -171,7 +265,7 @@ def main():
         if_exists="append",
         index=False
     )
-    print(f"✅ {len(df)} offres insérées dans bronze.linkedin_raw")
+    print(f"\n✅ {len(df)} offres insérées dans bronze.linkedin_raw")
     print("=" * 60)
 
 

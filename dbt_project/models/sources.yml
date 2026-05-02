@@ -1,0 +1,15 @@
+version: 2
+
+sources:
+  - name: bronze
+    description: "Données brutes scrapées des plateformes d'emploi marocaines"
+    schema: bronze
+    tables:
+      - name: rekrute_raw
+        description: "Offres scrapées depuis ReKrute.com"
+      - name: dreamjob_raw
+        description: "Offres scrapées depuis Dreamjob.ma"
+      - name: indeed_raw
+        description: "Offres scrapées depuis Indeed.ma (multi-keywords)"
+      - name: linkedin_raw
+        description: "Offres scrapées depuis LinkedIn (multi-keywords)"
